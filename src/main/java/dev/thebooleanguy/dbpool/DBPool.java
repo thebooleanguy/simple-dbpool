@@ -5,10 +5,17 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 
 public class DBPool {
+    private enum PoolState {
+        RUNNING,
+        SHUTDOWN,
+        TERMINATED
+    }
+
     private final int maxConnections;
     private int totalConnections = 0;
     private final List<Connection> idleConnections;
@@ -17,6 +24,7 @@ public class DBPool {
     private final String jdbcUrl;
     private final String username;
     private final String password;
+    private PoolState state = PoolState.RUNNING;
 
     public DBPool(int maxConnections, String jdbcUrl, String username, String password) {
         if (maxConnections <= 0) {
@@ -31,19 +39,39 @@ public class DBPool {
         this.borrowedConnections = new HashSet<Connection>(maxConnections);
     }
 
-    public Connection getConnection() throws SQLException {
+    public Connection getConnection() throws SQLException, InterruptedException {
         Connection connection = null;
         boolean createConnection = false;
+        boolean closeCreatedConnection = false;
+
+        long waitTimeMs = 1000;
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(waitTimeMs);
 
         synchronized (lock) {
-            if (totalConnections >= maxConnections && idleConnections.isEmpty()) {
-                throw new SQLException("No idle connection and capacity is exhausted");
-            } else if (!idleConnections.isEmpty()) {
-                connection = idleConnections.remove(0);
-                borrowedConnections.add(connection);
-            } else if (idleConnections.isEmpty() && totalConnections < maxConnections) {
-                totalConnections++;
-                createConnection = true;
+            while (true) {
+                if (state != PoolState.RUNNING) {
+                    throw new SQLException("DBPool is not running...");
+                }
+                long remainingTime = deadline - System.nanoTime();
+
+                if (remainingTime <= 0 && connection == null) {
+                    throw new SQLException("No idle connection and capacity is exhausted");
+                }
+                if (totalConnections >= maxConnections && idleConnections.isEmpty()) {
+
+                    long millis = remainingTime / 1_000_000;
+                    long fractionalNanos = remainingTime % 1_000_000;
+                    lock.wait(millis, (int) fractionalNanos);
+
+                } else if (!idleConnections.isEmpty()) {
+                    connection = idleConnections.remove(0);
+                    borrowedConnections.add(connection);
+                    break;
+                } else if (idleConnections.isEmpty() && totalConnections < maxConnections) {
+                    totalConnections++;
+                    createConnection = true;
+                    break;
+                }
             }
         }
 
@@ -55,16 +83,26 @@ public class DBPool {
             } catch (SQLException e) {
                 synchronized (lock) {
                     totalConnections--;
+                    lock.notifyAll();
                     throw e;
                 }
             }
         }
 
         synchronized (lock) {
-            if (createConnection) {
+            if (state != PoolState.RUNNING) {
+                closeCreatedConnection = true;
+                totalConnections--;
+            } else if (createConnection) {
                 borrowedConnections.add(connection);
             }
         }
+
+        if (closeCreatedConnection) {
+            connection.close();
+            throw new SQLException("Pool is not running");
+        }
+
         return connection;
     }
 
@@ -73,6 +111,25 @@ public class DBPool {
             if (borrowedConnections.remove(connection)) {
                 idleConnections.add(connection);
                 lock.notifyAll();
+            }
+        }
+    }
+
+    public void shutdown() throws SQLException {
+        Connection[] cleanupBuffer;
+        synchronized (lock) {
+            cleanupBuffer = new Connection[idleConnections.size()];
+            state = PoolState.SHUTDOWN;
+            cleanupBuffer = idleConnections.toArray(cleanupBuffer);
+            idleConnections.clear();
+            totalConnections -= cleanupBuffer.length;
+            lock.notifyAll();
+        }
+        for (Connection connection : cleanupBuffer) {
+            try {
+                connection.close();
+            } catch (SQLException e) {
+                System.err.println("Exception caught closing a connection: " + e.getMessage());
             }
         }
     }
