@@ -67,4 +67,13 @@ public class DBPool {
         }
         return connection;
     }
+
+    public void releaseConnection(Connection connection) {
+        synchronized (lock) {
+            if (borrowedConnections.remove(connection)) {
+                idleConnections.add(connection);
+                lock.notifyAll();
+            }
+        }
+    }
 }
