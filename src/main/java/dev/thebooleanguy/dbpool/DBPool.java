@@ -83,6 +83,9 @@ public class DBPool {
             } catch (SQLException e) {
                 synchronized (lock) {
                     totalConnections--;
+                    if (state == PoolState.SHUTDOWN && totalConnections == 0) {
+                        state = PoolState.TERMINATED;
+                    }
                     lock.notifyAll();
                     throw e;
                 }
@@ -92,44 +95,89 @@ public class DBPool {
         synchronized (lock) {
             if (state != PoolState.RUNNING) {
                 closeCreatedConnection = true;
-                totalConnections--;
             } else if (createConnection) {
                 borrowedConnections.add(connection);
             }
         }
 
         if (closeCreatedConnection) {
-            connection.close();
-            throw new SQLException("Pool is not running");
+            try {
+                connection.close();
+                throw new SQLException("Pool is not running");
+            } finally {
+                synchronized (lock) {
+                    totalConnections--;
+                    if (state == PoolState.SHUTDOWN && totalConnections == 0) {
+                        state = PoolState.TERMINATED;
+                    }
+                }
+            }
+
         }
 
         return connection;
     }
 
     public void releaseConnection(Connection connection) {
+        boolean closeConnection = false;
         synchronized (lock) {
-            if (borrowedConnections.remove(connection)) {
-                idleConnections.add(connection);
-                lock.notifyAll();
+            if (state == PoolState.RUNNING) {
+                if (borrowedConnections.remove(connection)) {
+                    idleConnections.add(connection);
+                    lock.notifyAll();
+                }
+            } else if (state == PoolState.SHUTDOWN) {
+                if (borrowedConnections.remove(connection)) {
+                    closeConnection = true;
+                }
+            }
+        }
+        if (closeConnection) {
+            try {
+                connection.close();
+            } catch (SQLException e) {
+                System.err.println("Exception caught closing a connection: " + e.getMessage());
+            } finally {
+                synchronized (lock) {
+                    totalConnections--;
+
+                    if (state == PoolState.SHUTDOWN && totalConnections == 0) {
+                        state = PoolState.TERMINATED;
+                    }
+                }
             }
         }
     }
 
-    public void shutdown() throws SQLException {
+    public void shutdown() {
         Connection[] cleanupBuffer;
         synchronized (lock) {
-            cleanupBuffer = new Connection[idleConnections.size()];
+            if (state != PoolState.RUNNING) {
+                return;
+            }
             state = PoolState.SHUTDOWN;
+            cleanupBuffer = new Connection[idleConnections.size()];
             cleanupBuffer = idleConnections.toArray(cleanupBuffer);
             idleConnections.clear();
-            totalConnections -= cleanupBuffer.length;
             lock.notifyAll();
+
+            if (totalConnections == 0) {
+                state = PoolState.TERMINATED;
+                return;
+            }
         }
         for (Connection connection : cleanupBuffer) {
             try {
                 connection.close();
             } catch (SQLException e) {
                 System.err.println("Exception caught closing a connection: " + e.getMessage());
+            } finally {
+                synchronized (lock) {
+                    totalConnections--;
+                    if (state == PoolState.SHUTDOWN && totalConnections == 0) {
+                        state = PoolState.TERMINATED;
+                    }
+                }
             }
         }
     }
