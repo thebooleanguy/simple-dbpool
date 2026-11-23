@@ -235,6 +235,127 @@ class DBPoolTest {
         assertTrue(borrowed.isClosed());
     }
 
+    /** An already terminated pool reports termination immediately. */
+    @Test
+    void awaitTerminationReturnsTrueWhenAlreadyTerminated() throws Exception {
+        DBPool pool = newPool(1);
+        pool.shutdown();
+        long start = System.nanoTime();
+
+        assertTrue(pool.awaitTermination(2, TimeUnit.SECONDS));
+
+        assertTrue(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start) < 500,
+                "An already terminated pool should return immediately");
+    }
+
+    /** A borrowed connection keeps a shut down pool alive until the timeout. */
+    @Test
+    void awaitTerminationTimesOutWhileConnectionIsBorrowed() throws Exception {
+        DBPool pool = newPool(1);
+        Connection borrowed = pool.getConnection();
+        pool.shutdown();
+        long start = System.nanoTime();
+
+        try {
+            assertFalse(pool.awaitTermination(200, TimeUnit.MILLISECONDS));
+            long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+            assertTrue(elapsedMillis >= 150, "Timed out too early: " + elapsedMillis + " ms");
+            assertTrue(elapsedMillis < 1500, "Timed out too late: " + elapsedMillis + " ms");
+        } finally {
+            pool.releaseConnection(borrowed);
+        }
+    }
+
+    /** Releasing the last borrowed connection wakes a termination waiter. */
+    @Test
+    void awaitTerminationCompletesAfterBorrowedConnectionIsReleased() throws Exception {
+        DBPool pool = newPool(1);
+        Connection borrowed = pool.getConnection();
+        pool.shutdown();
+        CountDownLatch started = new CountDownLatch(1);
+        AtomicReference<Thread> waiterThread = new AtomicReference<>();
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        boolean released = false;
+        try {
+            Future<Boolean> termination = executor.submit(() -> {
+                waiterThread.set(Thread.currentThread());
+                started.countDown();
+                return pool.awaitTermination(5, TimeUnit.SECONDS);
+            });
+            assertTrue(started.await(2, TimeUnit.SECONDS));
+            awaitWaiting(waiterThread.get());
+
+            pool.releaseConnection(borrowed);
+            released = true;
+
+            assertTrue(termination.get(2, TimeUnit.SECONDS));
+        } finally {
+            if (!released) {
+                pool.releaseConnection(borrowed);
+            }
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(2, TimeUnit.SECONDS));
+        }
+    }
+
+    /**
+     * A zero timeout returns false immediately while a borrowed connection remains.
+     */
+    @Test
+    void awaitTerminationWithZeroTimeoutDoesNotWait() throws Exception {
+        DBPool pool = newPool(1);
+        Connection borrowed = pool.getConnection();
+        pool.shutdown();
+        long start = System.nanoTime();
+
+        try {
+            assertFalse(pool.awaitTermination(0, TimeUnit.MILLISECONDS));
+            assertTrue(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start) < 500,
+                    "A zero timeout should return without waiting");
+        } finally {
+            pool.releaseConnection(borrowed);
+        }
+    }
+
+    /**
+     * A waiting termination call exits with InterruptedException when interrupted.
+     */
+    @Test
+    void awaitTerminationRespondsToInterruption() throws Exception {
+        DBPool pool = newPool(1);
+        Connection borrowed = pool.getConnection();
+        pool.shutdown();
+        CountDownLatch started = new CountDownLatch(1);
+        AtomicReference<Throwable> outcome = new AtomicReference<>();
+        Thread waiter = new Thread(() -> {
+            started.countDown();
+            try {
+                outcome.set(pool.awaitTermination(5, TimeUnit.SECONDS)
+                        ? new AssertionError("Pool terminated before the borrowed connection was released")
+                        : new AssertionError("Termination wait unexpectedly timed out"));
+            } catch (InterruptedException interrupted) {
+                outcome.set(interrupted);
+            }
+        });
+        waiter.start();
+
+        try {
+            assertTrue(started.await(2, TimeUnit.SECONDS));
+            awaitWaiting(waiter);
+            waiter.interrupt();
+            waiter.join(2_000);
+
+            assertFalse(waiter.isAlive(), "Interrupted termination waiter did not exit");
+            assertInstanceOf(InterruptedException.class, outcome.get());
+        } finally {
+            if (waiter.isAlive()) {
+                waiter.interrupt();
+                waiter.join(2_000);
+            }
+            pool.releaseConnection(borrowed);
+        }
+    }
+
     /** A creation that finishes after shutdown is closed and never handed out. */
     @Test
     void shutdownDuringCreationClosesNewConnection() throws Exception {
