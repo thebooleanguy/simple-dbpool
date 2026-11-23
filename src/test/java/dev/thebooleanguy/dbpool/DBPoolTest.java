@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.IOException;
 import java.lang.reflect.Proxy;
 import java.sql.Connection;
 import java.sql.Driver;
@@ -430,8 +431,24 @@ class DBPoolTest {
         assertSame(held, pool.getConnection());
     }
 
-    private DBPool newPool(int maximum) {
-        DBPool pool = new DBPool(maximum, driver.url, "user", "password");
+    private DBPool newPool(int maximum) throws IOException {
+        DBConfig config = new DBConfig() {
+            @Override
+            public String getUrl() {
+                return driver.url;
+            }
+
+            @Override
+            public String getUsername() {
+                return "user";
+            }
+
+            @Override
+            public String getPassword() {
+                return "password";
+            }
+        };
+        DBPool pool = new DBPool(maximum, config);
         pools.add(pool);
         return pool;
     }

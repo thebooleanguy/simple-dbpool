@@ -4,6 +4,7 @@ import java.sql.Connection;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.sql.DriverManager;
@@ -21,19 +22,22 @@ public class DBPool {
     private final List<Connection> idleConnections;
     private final Set<Connection> borrowedConnections;
     private final Object lock = new Object();
-    private final String jdbcUrl;
-    private final String username;
-    private final String password;
+    private final DBConfig config;
+    private final Properties connectionProperties;
     private PoolState state = PoolState.RUNNING;
 
-    public DBPool(int maxConnections, String jdbcUrl, String username, String password) {
+    public DBPool(int maxConnections, DBConfig dbConfig) {
         if (maxConnections <= 0) {
             throw new IllegalArgumentException("maxConnections must be greater than zero");
         }
         this.maxConnections = maxConnections;
-        this.jdbcUrl = jdbcUrl;
-        this.username = username;
-        this.password = password;
+        this.config = dbConfig;
+
+        connectionProperties = new Properties();
+        connectionProperties.setProperty("user", config.getUsername());
+        if (config.getPassword() != null) {
+            connectionProperties.setProperty("password", config.getPassword());
+        }
 
         this.idleConnections = new ArrayList<Connection>(maxConnections);
         this.borrowedConnections = new HashSet<Connection>(maxConnections);
@@ -79,7 +83,7 @@ public class DBPool {
             return connection;
         } else if (createConnection) {
             try {
-                connection = DriverManager.getConnection(jdbcUrl, username, password);
+                connection = DriverManager.getConnection(config.getUrl(), connectionProperties);
             } catch (SQLException e) {
                 synchronized (lock) {
                     totalConnections--;

@@ -1,5 +1,6 @@
 package dev.thebooleanguy.dbpool;
 
+import java.io.IOException;
 import java.sql.Connection;
 import java.sql.SQLException;
 
@@ -7,12 +8,8 @@ public class App {
     public static void main(String[] args) {
         System.out.println("simple-dbpool");
 
-        String jdbcUrl = "jdbc:h2:mem:pooltest;DB_CLOSE_DELAY=-1";
-        String username = "sa";
-        String password = "";
-
         try {
-            DBPool pool = new DBPool(2, jdbcUrl, username, password);
+            DBPool pool = new DBPool(2, new DBConfig());
 
             Connection c1 = pool.getConnection();
             pool.releaseConnection(c1);
@@ -23,7 +20,7 @@ public class App {
 
             pool.releaseConnection(c2);
             pool.shutdown();
-        } catch (InterruptedException | SQLException e) {
+        } catch (InterruptedException | SQLException | IOException e) {
             System.err.println(e.getMessage());
         }
     }
