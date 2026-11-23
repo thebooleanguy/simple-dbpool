@@ -85,6 +85,7 @@ public class DBPool {
                     totalConnections--;
                     if (state == PoolState.SHUTDOWN && totalConnections == 0) {
                         state = PoolState.TERMINATED;
+                        lock.notifyAll();
                     }
                     lock.notifyAll();
                     throw e;
@@ -109,6 +110,7 @@ public class DBPool {
                     totalConnections--;
                     if (state == PoolState.SHUTDOWN && totalConnections == 0) {
                         state = PoolState.TERMINATED;
+                        lock.notifyAll();
                     }
                 }
             }
@@ -143,6 +145,7 @@ public class DBPool {
 
                     if (state == PoolState.SHUTDOWN && totalConnections == 0) {
                         state = PoolState.TERMINATED;
+                        lock.notifyAll();
                     }
                 }
             }
@@ -163,6 +166,7 @@ public class DBPool {
 
             if (totalConnections == 0) {
                 state = PoolState.TERMINATED;
+                lock.notifyAll();
                 return;
             }
         }
@@ -176,9 +180,48 @@ public class DBPool {
                     totalConnections--;
                     if (state == PoolState.SHUTDOWN && totalConnections == 0) {
                         state = PoolState.TERMINATED;
+                        lock.notifyAll();
                     }
                 }
             }
+        }
+    }
+
+    public boolean awaitTermination(long timeout, TimeUnit unit) throws InterruptedException {
+        if (unit == null) {
+            throw new NullPointerException("Null unit supplied by the caller");
+        }
+        if (timeout < 0) {
+            throw new IllegalArgumentException("Negative timeout supplied by the caller");
+        }
+
+        synchronized (lock) {
+            if (state == PoolState.RUNNING) {
+                return false;
+            } else if (state == PoolState.TERMINATED) {
+                return true;
+            }
+
+            long deadline = System.nanoTime() + unit.toNanos(timeout);
+            long remainingTime = deadline - System.nanoTime();
+
+            while (true) {
+                if (remainingTime <= 0) {
+                    break;
+                }
+
+                long millis = remainingTime / 1_000_000;
+                long fractionalNanos = remainingTime % 1_000_000;
+
+                if (state != PoolState.SHUTDOWN) {
+                    break;
+                }
+                lock.wait(millis, (int) fractionalNanos);
+
+                remainingTime = deadline - System.nanoTime();
+            }
+
+            return state == PoolState.TERMINATED;
         }
     }
 }
